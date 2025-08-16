@@ -12,15 +12,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("ref-bot")
 
 # ---------- Config via environment variables ----------
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # from @BotFather
-CHANNEL = os.getenv("CHANNEL")      # e.g. @FREEAwekTiktok (must include @)
-DB_PATH = os.getenv("DB_PATH", "data.db")
-
-JOIN_TEXT = (
-    "📣 Join our channel to activate your invite:\n"
-    "{channel}\n\n"
-    "After joining, tap ✅ Verify Join."
-)
+BOT_TOKEN = os.getenv("BOT_TOKEN")   # from @BotFather
+CHANNEL  = os.getenv("CHANNEL")      # e.g. @FREEAwekTiktok (must include @)
+DB_PATH  = os.getenv("DB_PATH", "data.db")
 
 # ---------- DB ----------
 async def init_db():
@@ -62,9 +56,7 @@ async def get_points(user_id:int)->int:
             (user_id,)
         )
         row = await cur.fetchone()
-        if not row:
-            return 0
-        return int(row[0])
+        return int(row[0]) if row else 0
 
 async def add_pending_referral(referrer_id:int, referee_id:int):
     if referrer_id == referee_id:
@@ -96,10 +88,12 @@ async def mark_credited(referee_id:int) -> Optional[int]:
         await db.commit()
         return int(referrer_id)
 
+# ---------- UI ----------
 def verify_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📲 Join Channel", url=f"https://t.me/{CHANNEL.lstrip('@')}")],
-        [InlineKeyboardButton("✅ Verify Join", callback_data="verify_join")]
+        [InlineKeyboardButton("✅ Verify Join", callback_data="verify_join")],
+        [InlineKeyboardButton("🏅 My Points",  callback_data="my_points")]
     ])
 
 # ---------- Handlers ----------
@@ -107,27 +101,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await upsert_user(user)
 
-    # Deep-link: /start <referrer_id>
+    # Deep-link: /start <arg>
+    # - "points"  => instantly show current points (nice for pinned 'My Points' links)
+    # - <digits>  => treat as referrer_id and store pending referral
     referrer_id = None
-if context.args:
-    arg = context.args[0].lower()
+    if context.args:
+        arg = context.args[0].lower()
 
-    # Deep-link helper: t.me/YourBot?start=points
-    if arg == "points":
-        pts = await get_points(update.effective_user.id)
-        await update.message.reply_text(
-            f"🏅 Your points: *{pts}*",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=verify_keyboard()
-        )
-        return
+        if arg == "points":
+            pts = await get_points(user.id)
+            await update.message.reply_text(
+                f"🏅 Your points: *{pts}*",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=verify_keyboard()
+            )
+            return
 
-    # Otherwise, treat numeric arg as referrer id
-    try:
-        referrer_id = int(arg)
-    except ValueError:
-        referrer_id = None
-
+        try:
+            referrer_id = int(arg)
+        except ValueError:
+            referrer_id = None
 
     if referrer_id:
         await add_pending_referral(referrer_id, user.id)
@@ -141,14 +134,9 @@ if context.args:
         "Invite friends with this link. You’ll get +1 point when they join the channel and verify.\n\n"
         "If you arrived via someone’s link, please join & verify below."
     )
-    if update.message:
-        await update.message.reply_text(
-            text, reply_markup=verify_keyboard(), parse_mode=ParseMode.MARKDOWN
-        )
-    elif update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, reply_markup=verify_keyboard(), parse_mode=ParseMode.MARKDOWN
-        )
+    await update.message.reply_text(
+        text, reply_markup=verify_keyboard(), parse_mode=ParseMode.MARKDOWN
+    )
 
 async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -158,7 +146,7 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL, user_id=user_id)
         status = member.status  # 'member','administrator','creator','left','kicked'
-    except Exception as e:
+    except Exception:
         logger.exception("get_chat_member failed")
         await query.edit_message_text(
             "⚠️ I couldn't check your membership. Make sure the bot is an *admin* in the channel, then tap Verify again.",
@@ -185,6 +173,13 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=verify_keyboard()
         )
+
+async def cb_points_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles taps on the 'My Points' inline button."""
+    query = update.callback_query
+    await query.answer()
+    pts = await get_points(query.from_user.id)
+    await query.message.reply_text(f"🏅 Your points: *{pts}*", parse_mode=ParseMode.MARKDOWN)
 
 async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -247,16 +242,16 @@ async def runner():
     app.add_handler(CommandHandler("points", points_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(cb_verify, pattern="^verify_join$"))
+    app.add_handler(CallbackQueryHandler(cb_verify,      pattern="^verify_join$"))
+    app.add_handler(CallbackQueryHandler(cb_points_button, pattern="^my_points$"))
 
     logging.info("Bot starting…")
 
-    # Initialize + start + begin polling
+    # Initialize + start + begin polling, then keep running
     await app.initialize()
     await app.start()
     await app.updater.start_polling(allowed_updates=["message", "callback_query"])
 
-    # Keep the process alive forever
     try:
         await asyncio.Event().wait()
     finally:
@@ -264,8 +259,5 @@ async def runner():
         await app.stop()
         await app.shutdown()
 
-
 if __name__ == "__main__":
     asyncio.run(runner())
-
-
