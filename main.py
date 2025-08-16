@@ -220,15 +220,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-def main():
-    # Make sure required env vars exist
+# ---------- RUNNER (async, Python 3.12 safe) ----------
+async def runner():
     if not BOT_TOKEN or not CHANNEL:
         raise SystemExit("Missing BOT_TOKEN or CHANNEL env vars.")
 
-    # Initialize the DB before the bot starts
-    asyncio.run(init_db())
+    await init_db()
 
-    # Build the Telegram application and register handlers
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link_cmd))
@@ -238,10 +236,22 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_verify, pattern="^verify_join$"))
 
     logging.info("Bot starting…")
-    # IMPORTANT: run_polling is synchronous (no await)
-    app.run_polling(allowed_updates=["message", "callback_query"])
+
+    # Initialize + start + begin polling
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=["message", "callback_query"])
+
+    # Keep the process alive forever
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(runner())
+
 
