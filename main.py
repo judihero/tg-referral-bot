@@ -109,11 +109,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Deep-link: /start <referrer_id>
     referrer_id = None
-    if context.args:
-        try:
-            referrer_id = int(context.args[0])
-        except ValueError:
-            referrer_id = None
+if context.args:
+    arg = context.args[0].lower()
+
+    # Deep-link helper: t.me/YourBot?start=points
+    if arg == "points":
+        pts = await get_points(update.effective_user.id)
+        await update.message.reply_text(
+            f"🏅 Your points: *{pts}*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=verify_keyboard()
+        )
+        return
+
+    # Otherwise, treat numeric arg as referrer id
+    try:
+        referrer_id = int(arg)
+    except ValueError:
+        referrer_id = None
+
 
     if referrer_id:
         await add_pending_referral(referrer_id, user.id)
