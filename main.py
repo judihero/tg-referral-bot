@@ -220,10 +220,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-async def main():
+def main():
+    # Make sure required env vars exist
     if not BOT_TOKEN or not CHANNEL:
         raise SystemExit("Missing BOT_TOKEN or CHANNEL env vars.")
-    await init_db()
+
+    # Initialize the DB before the bot starts
+    asyncio.run(init_db())
+
+    # Build the Telegram application and register handlers
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link_cmd))
@@ -231,8 +236,12 @@ async def main():
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(cb_verify, pattern="^verify_join$"))
-    logger.info("Bot starting…")
-    await app.run_polling(allowed_updates=["message", "callback_query"])
+
+    logging.info("Bot starting…")
+    # IMPORTANT: run_polling is synchronous (no await)
+    app.run_polling(allowed_updates=["message", "callback_query"])
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
