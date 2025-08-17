@@ -1,4 +1,4 @@
-import os, io, csv, logging, asyncio, aiosqlite
+import os, io, csv, html, logging, asyncio, aiosqlite
 from typing import Optional, Tuple
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
@@ -14,15 +14,13 @@ CHANNEL  = os.getenv("CHANNEL")               # e.g. @FREEAwekTiktok (include @)
 DB_PATH  = os.getenv("DB_PATH", "data.db")    # SQLite file (NOTE: resets on redeploy!)
 
 # ---------- Reward catalog (EDIT THIS) ----------
-# code: {label (button text), cost (points), payload (what user receives), repeatable (bool)}
 REWARDS = {
     "vip1": {
         "label": "🎁 Unlock VIP Pack (2 points)",
         "cost": 2,
         "payload": "https://t.me/lexxis00",
-        "repeatable": True  # True to allow multiple purchases
+        "repeatable": True
     },
-    # Add more rewards by copying this block with a new key
 }
 
 # ---------- DB ----------
@@ -51,7 +49,7 @@ async def init_db():
                 reward_code TEXT,
                 cost        INTEGER,
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, reward_code)  -- blocks double-redeem for one-time rewards
+                UNIQUE(user_id, reward_code)
             )
         """)
         await db.commit()
@@ -153,7 +151,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     referrer_id = None
     if context.args:
         arg = context.args[0].lower()
-        # Deep-link: t.me/Bot?start=points
         if arg == "points":
             earned, spent, balance = await get_balance(user.id)
             await update.message.reply_text(
@@ -228,7 +225,7 @@ async def cb_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
-    data = q.data  # e.g. "redeem_vip1"
+    data = q.data  # e.g., "redeem_vip1"
     code = data.split("_", 1)[1] if "_" in data else ""
     reward = REWARDS.get(code)
     if not reward:
@@ -238,7 +235,6 @@ async def cb_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     earned, spent, balance = await get_balance(user_id)
     cost = int(reward["cost"])
 
-    # Already redeemed? (for one-time rewards)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT 1 FROM redemptions WHERE user_id=? AND reward_code=? LIMIT 1", (user_id, code))
         exists = await cur.fetchone()
@@ -253,7 +249,6 @@ async def cb_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Deduct by inserting a redemption row
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             await db.execute("INSERT INTO redemptions(user_id, reward_code, cost) VALUES (?, ?, ?)", (user_id, code, cost))
@@ -308,7 +303,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/link – show your personal invite link\n"
         "/points – show your points (earned/spent/available)\n"
         "/top – leaderboard\n\n"
-        "Tap the 🎁 button to redeem rewards with your points."
+        "Admins: /dashboard, /allpoints [N], /recent [N], /whoinvited <@user|id>, /table [page] [size], /exportcsv\n"
+        "Tap the 🎁 button to redeem rewards."
     )
 
 # ---------- Admin-only Insights ----------
@@ -465,7 +461,68 @@ async def whoinvited_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{label} was invited by {_label(referrer_id, users_map)} on {str(created_at)[:16]} — {status}."
     )
 
-# Optional CSV (keep if you like)
+# ---------- NEW: Admin table like your screenshot ----------
+async def table_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show table: user_id | username | earned | spent | balance (paginated)."""
+    if not await is_channel_admin(update.effective_user.id, context):
+        await update.message.reply_text("Admins only."); return
+
+    # Args: /table [page] [size]
+    try:
+        page = max(int(context.args[0]), 1) if len(context.args) >= 1 else 1
+    except ValueError:
+        page = 1
+    try:
+        size = min(max(int(context.args[1]), 1), 200) if len(context.args) >= 2 else 20
+    except ValueError:
+        size = 20
+    offset = (page - 1) * size
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        total_users = int((await cur.fetchone())[0])
+
+        cur = await db.execute(f"""
+            SELECT u.user_id,
+                   COALESCE(u.username,'') AS username,
+                   COALESCE(t.earned,0)   AS earned,
+                   COALESCE(s.spent,0)    AS spent,
+                   COALESCE(t.earned,0) - COALESCE(s.spent,0) AS balance
+            FROM users u
+            LEFT JOIN (
+                SELECT referrer_id, COUNT(*) AS earned
+                FROM referrals WHERE credited=1 GROUP BY referrer_id
+            ) t ON t.referrer_id = u.user_id
+            LEFT JOIN (
+                SELECT user_id, COALESCE(SUM(cost),0) AS spent
+                FROM redemptions GROUP BY user_id
+            ) s ON s.user_id = u.user_id
+            ORDER BY balance DESC, earned DESC, u.user_id ASC
+            LIMIT ? OFFSET ?
+        """, (size, offset))
+        rows = await cur.fetchall()
+
+    pages = max((total_users + size - 1) // size, 1)
+
+    # Build fixed-width table (use HTML <pre> to preserve spaces)
+    header = f"{'user_id':<12} {'username':<18} {'earned':>6} {'spent':>6} {'balance':>7}"
+    line   = "-" * len(header)
+    body_lines = []
+    for user_id, uname, earned, spent, balance in rows:
+        uname = (uname or "")
+        # Escape for HTML and trim to width
+        uname = html.escape(uname)[:18]
+        body_lines.append(f"{str(user_id):<12} {uname:<18} {int(earned):>6} {int(spent):>6} {int(balance):>7}")
+
+    table_text = header + "\n" + line + "\n" + ("\n".join(body_lines) if body_lines else "(no rows)")
+    footer = f"\n\nPage {page}/{pages} • Use /table <page> <size> (e.g., /table 2 20)"
+
+    await update.message.reply_text(
+        f"<pre>{html.escape(table_text)}</pre>{footer}",
+        parse_mode=ParseMode.HTML
+    )
+
+# ---------- Optional CSV ----------
 async def exportcsv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_channel_admin(update.effective_user.id, context):
         await update.message.reply_text("Admins only."); return
@@ -513,6 +570,7 @@ async def runner():
     app.add_handler(CommandHandler("allpoints",  allpoints_cmd))
     app.add_handler(CommandHandler("recent",     recent_cmd))
     app.add_handler(CommandHandler("whoinvited", whoinvited_cmd))
+    app.add_handler(CommandHandler("table",      table_cmd))       # << NEW
     app.add_handler(CommandHandler("exportcsv",  exportcsv_cmd))
     # callbacks
     app.add_handler(CallbackQueryHandler(cb_verify,        pattern="^verify_join$"))
