@@ -17,10 +17,10 @@ DB_PATH  = os.getenv("DB_PATH", "data.db")    # SQLite file (NOTE: resets on red
 # code: {label (button text), cost (points), payload (what user receives), repeatable (bool)}
 REWARDS = {
     "vip1": {
-        "label": "🎁 Unlock VIP Pack (2 Points)",
+        "label": "🎁 Unlock VIP Pack (2 points)",
         "cost": 2,
         "payload": "https://t.me/lexxis00",
-        "repeatable": True  # set True if you want users to buy multiple times
+        "repeatable": True  # True to allow multiple purchases
     },
     # Add more rewards by copying this block with a new key
 }
@@ -51,7 +51,7 @@ async def init_db():
                 reward_code TEXT,
                 cost        INTEGER,
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, reward_code)  -- avoids double-redeem of same one-time reward
+                UNIQUE(user_id, reward_code)  -- blocks double-redeem for one-time rewards
             )
         """)
         await db.commit()
@@ -83,7 +83,10 @@ async def add_pending_referral(referrer_id:int, referee_id:int):
     if referrer_id == referee_id:
         return
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO referrals(referrer_id, referee_id, credited) VALUES (?, ?, 0)", (referrer_id, referee_id))
+        await db.execute(
+            "INSERT OR IGNORE INTO referrals(referrer_id, referee_id, credited) VALUES (?, ?, 0)",
+            (referrer_id, referee_id)
+        )
         await db.commit()
 
 async def mark_credited(referee_id:int) -> Optional[int]:
@@ -104,10 +107,13 @@ def main_keyboard():
         [InlineKeyboardButton("✅ Verify Join", callback_data="verify_join")],
         [InlineKeyboardButton("🏅 My Points",  callback_data="my_points")],
     ]
-    # Add one button per reward
     for code, r in REWARDS.items():
         rows.append([InlineKeyboardButton(r["label"], callback_data=f"redeem_{code}")])
     return InlineKeyboardMarkup(rows)
+
+def _label(uid: int, users: dict) -> str:
+    uname = users.get(int(uid), "")
+    return f"@{uname}" if uname else f"User {uid}"
 
 async def is_channel_admin(user_id:int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -116,12 +122,14 @@ async def is_channel_admin(user_id:int, context: ContextTypes.DEFAULT_TYPE) -> b
     except Exception:
         return False
 
-async def resolve_target_user(arg: str) -> Optional[Tuple[int, str]]:
+async def resolve_target_user(arg: str):
     if not arg: return None
     async with aiosqlite.connect(DB_PATH) as db:
         if arg.startswith("@"):
             uname = arg[1:].lower()
-            cur = await db.execute("SELECT user_id, COALESCE(username,'') FROM users WHERE lower(username)=? LIMIT 1", (uname,))
+            cur = await db.execute(
+                "SELECT user_id, COALESCE(username,'') FROM users WHERE lower(username)=? LIMIT 1", (uname,)
+            )
             row = await cur.fetchone()
             if not row: return None
             uid, uname = int(row[0]), row[1]
@@ -137,7 +145,7 @@ async def resolve_target_user(arg: str) -> Optional[Tuple[int, str]]:
         label = f"@{uname}" if uname else f"User {uid}"
         return uid, label
 
-# ---------- Handlers ----------
+# ---------- User Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await upsert_user(user)
@@ -145,6 +153,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     referrer_id = None
     if context.args:
         arg = context.args[0].lower()
+        # Deep-link: t.me/Bot?start=points
         if arg == "points":
             earned, spent, balance = await get_balance(user.id)
             await update.message.reply_text(
@@ -180,7 +189,10 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = m.status
     except Exception:
         logger.exception("get_chat_member failed")
-        await q.edit_message_text("⚠️ I couldn't check your membership. Make sure the bot is an *admin* in the channel, then tap Verify again.", parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text(
+            "⚠️ I couldn't check your membership. Make sure the bot is an *admin* in the channel, then tap Verify again.",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     if status in ("member", "administrator", "creator"):
@@ -188,12 +200,20 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if referrer_id:
             earned, spent, balance = await get_balance(referrer_id)
             try:
-                await context.bot.send_message(referrer_id, f"🎉 A friend joined via your link! You now have *{earned}* earned / *{spent}* spent / *{balance}* available.", parse_mode=ParseMode.MARKDOWN)
+                await context.bot.send_message(
+                    referrer_id,
+                    f"🎉 A friend joined via your link! You now have *{earned}* earned / *{spent}* spent / *{balance}* available.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
             except Exception:
                 pass
         await q.edit_message_text("✅ Verified! Thanks for joining. Enjoy the channel 🎉")
     else:
-        await q.edit_message_text("❌ Not joined yet. Tap *Join Channel* first, then press *Verify Join*.", parse_mode=ParseMode.MARKDOWN, reply_markup=main_keyboard())
+        await q.edit_message_text(
+            "❌ Not joined yet. Tap *Join Channel* first, then press *Verify Join*.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=main_keyboard()
+        )
 
 async def cb_points_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -208,7 +228,7 @@ async def cb_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
-    data = q.data  # e.g., "redeem_vip1"
+    data = q.data  # e.g. "redeem_vip1"
     code = data.split("_", 1)[1] if "_" in data else ""
     reward = REWARDS.get(code)
     if not reward:
@@ -218,7 +238,7 @@ async def cb_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     earned, spent, balance = await get_balance(user_id)
     cost = int(reward["cost"])
 
-    # If one-time reward and already redeemed, block
+    # Already redeemed? (for one-time rewards)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT 1 FROM redemptions WHERE user_id=? AND reward_code=? LIMIT 1", (user_id, code))
         exists = await cur.fetchone()
@@ -227,22 +247,22 @@ async def cb_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if balance < cost:
-        await q.message.reply_text(f"❌ Not enough points.\nNeeded: *{cost}* • Available: *{balance}*\nInvite more friends and try again.", parse_mode=ParseMode.MARKDOWN)
+        await q.message.reply_text(
+            f"❌ Not enough points.\nNeeded: *{cost}* • Available: *{balance}*",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
-    # Deduct: record a redemption row (atomic enough for this use)
+    # Deduct by inserting a redemption row
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             await db.execute("INSERT INTO redemptions(user_id, reward_code, cost) VALUES (?, ?, ?)", (user_id, code, cost))
             await db.commit()
-        except Exception as e:
-            # If UNIQUE violation due to double tap on non-repeatable, treat as success
+        except Exception:
             await q.message.reply_text("⚠️ Looks like you already redeemed this.")
             return
 
-    # Send reward
-    payload = reward["payload"]
-    await q.message.reply_text(f"🎁 Unlocked!\nHere is your reward:\n{payload}")
+    await q.message.reply_text(f"🎁 Unlocked!\nHere is your reward:\n{reward['payload']}")
 
 async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -286,55 +306,169 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/start – get your invite link & verify join\n"
         "/link – show your personal invite link\n"
-        "/points – show your points (earned / spent / available)\n"
+        "/points – show your points (earned/spent/available)\n"
         "/top – leaderboard\n\n"
         "Tap the 🎁 button to redeem rewards with your points."
     )
 
-# ---------- Admin tools (optional; keep if you already use) ----------
-async def is_channel_admin(user_id:int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        m = await context.bot.get_chat_member(chat_id=CHANNEL, user_id=user_id)
-        return m.status in ("administrator", "creator")
-    except Exception:
-        return False
-
-async def userpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- Admin-only Insights ----------
+async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_channel_admin(update.effective_user.id, context):
-        await update.message.reply_text("Admins only.")
+        await update.message.reply_text("Admins only."); return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        total_users = int((await cur.fetchone())[0])
+
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE credited=1")
+        total_credited = int((await cur.fetchone())[0])
+
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE credited=0")
+        total_pending = int((await cur.fetchone())[0])
+
+        cur = await db.execute("""
+            SELECT referrer_id, COUNT(*) AS pts
+            FROM referrals
+            WHERE credited=1
+            GROUP BY referrer_id
+            ORDER BY pts DESC
+            LIMIT 10
+        """)
+        top_rows = await cur.fetchall()
+
+        cur = await db.execute("SELECT user_id, COALESCE(username,'') FROM users")
+        users_map = {int(r[0]): (r[1] or "") for r in await cur.fetchall()}
+
+    lines = [
+        "📊 *Dashboard*",
+        f"• Users: *{total_users}*",
+        f"• Credited referrals: *{total_credited}*",
+        f"• Pending referrals: *{total_pending}*",
+        "",
+        "🏆 *Top 10*"
+    ]
+    if not top_rows:
+        lines.append("No data yet.")
+    else:
+        for i, (uid, pts) in enumerate(top_rows,  start=1):
+            lines.append(f"{i}. {_label(int(uid), users_map)} — {int(pts)}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def allpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_channel_admin(update.effective_user.id, context):
+        await update.message.reply_text("Admins only."); return
+    try:
+        limit = min(max(int(context.args[0]), 1), 200) if context.args else 50
+    except ValueError:
+        limit = 50
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            SELECT referrer_id, COUNT(*) AS earned
+            FROM referrals
+            WHERE credited=1
+            GROUP BY referrer_id
+            ORDER BY earned DESC
+            LIMIT ?
+        """, (limit,))
+        earned_rows = await cur.fetchall()
+
+        cur = await db.execute("""
+            SELECT user_id, COALESCE(SUM(cost),0) AS spent
+            FROM redemptions GROUP BY user_id
+        """)
+        spent_map = {int(r[0]): int(r[1]) for r in await cur.fetchall()}
+
+        cur = await db.execute("SELECT user_id, COALESCE(username,'') FROM users")
+        users_map = {int(r[0]): (r[1] or "") for r in await cur.fetchall()}
+
+    if not earned_rows:
+        await update.message.reply_text("No referrals yet.")
         return
+
+    lines = ["📋 *All Points* (top)", "`rank  user                earned  spent  balance`"]
+    rank = 1
+    for uid, earned in earned_rows:
+        uid = int(uid); earned = int(earned)
+        spent = spent_map.get(uid, 0)
+        bal = max(0, earned - spent)
+        label = _label(uid, users_map)
+        lines.append(f"`{rank:>4}  {label:<18}  {earned:>6}  {spent:>5}  {bal:>7}`")
+        rank += 1
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def recent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_channel_admin(update.effective_user.id, context):
+        await update.message.reply_text("Admins only."); return
+    try:
+        limit = min(max(int(context.args[0]), 1), 200) if context.args else 30
+    except ValueError:
+        limit = 30
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            SELECT created_at, referrer_id, referee_id
+            FROM referrals
+            WHERE credited=1
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
+        rows = await cur.fetchall()
+        cur = await db.execute("SELECT user_id, COALESCE(username,'') FROM users")
+        users_map = {int(r[0]): (r[1] or "") for r in await cur.fetchall()}
+
+    if not rows:
+        await update.message.reply_text("No credited referrals yet.")
+        return
+
+    lines = ["🕒 *Recent referrals*"]
+    for created, referrer, referee in rows:
+        lines.append(f"{str(created)[:16]} — {_label(int(referrer), users_map)} → {_label(int(referee), users_map)}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def whoinvited_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_channel_admin(update.effective_user.id, context):
+        await update.message.reply_text("Admins only."); return
     if not context.args:
-        await update.message.reply_text("Usage: /userpoints <@username or user_id>")
+        await update.message.reply_text("Usage: /whoinvited <@username or user_id>")
         return
+
     target = " ".join(context.args).strip()
     resolved = await resolve_target_user(target)
     if not resolved:
-        await update.message.reply_text("User not found in my records. Ask them to /start the bot first.")
+        await update.message.reply_text("User not found in my records.")
         return
     uid, label = resolved
-    earned, spent, balance = await get_balance(uid)
-    # last 10 credited
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
-            SELECT r.referee_id, r.created_at, COALESCE(u.username,'')
-            FROM referrals r
-            LEFT JOIN users u ON u.user_id=r.referee_id
-            WHERE r.referrer_id=? AND r.credited=1
-            ORDER BY r.created_at DESC
-            LIMIT 10
+            SELECT referrer_id, created_at, credited
+            FROM referrals
+            WHERE referee_id=?
+            ORDER BY created_at ASC
+            LIMIT 1
         """, (uid,))
-        rows = await cur.fetchall()
-    if rows:
-        detail = "\n".join(f"• @{row[2]}" if row[2] else f"• {int(row[0])} — {str(row[1])[:10]}" for row in rows)
-        msg = f"📊 {label}\n🏅 Earned: *{earned}*  Spent: *{spent}*  Available: *{balance}*\n\nRecent:\n{detail}"
-    else:
-        msg = f"📊 {label}\n🏅 Earned: *{earned}*  Spent: *{spent}*  Available: *{balance}*\n\n(No credited referrals yet.)"
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        row = await cur.fetchone()
 
+    if not row:
+        await update.message.reply_text(f"{label} has no referral record.")
+        return
+
+    referrer_id, created_at, credited = int(row[0]), row[1], int(row[2])
+    status = "credited ✅" if credited == 1 else "pending ⏳"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT user_id, COALESCE(username,'') FROM users")
+        users_map = {int(r[0]): (r[1] or "") for r in await cur.fetchall()}
+
+    await update.message.reply_text(
+        f"{label} was invited by {_label(referrer_id, users_map)} on {str(created_at)[:16]} — {status}."
+    )
+
+# Optional CSV (keep if you like)
 async def exportcsv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_channel_admin(update.effective_user.id, context):
-        await update.message.reply_text("Admins only.")
-        return
+        await update.message.reply_text("Admins only."); return
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
             SELECT u.user_id, COALESCE(u.username,'') AS username,
@@ -366,19 +500,25 @@ async def runner():
     if not BOT_TOKEN or not CHANNEL:
         raise SystemExit("Missing BOT_TOKEN or CHANNEL env vars.")
     await init_db()
+
     app = Application.builder().token(BOT_TOKEN).build()
+    # user cmds
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link_cmd))
     app.add_handler(CommandHandler("points", points_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    # admin
-    app.add_handler(CommandHandler("userpoints", userpoints_cmd))
-    app.add_handler(CommandHandler("exportcsv", exportcsv_cmd))
+    # admin cmds
+    app.add_handler(CommandHandler("dashboard",  dashboard_cmd))
+    app.add_handler(CommandHandler("allpoints",  allpoints_cmd))
+    app.add_handler(CommandHandler("recent",     recent_cmd))
+    app.add_handler(CommandHandler("whoinvited", whoinvited_cmd))
+    app.add_handler(CommandHandler("exportcsv",  exportcsv_cmd))
     # callbacks
-    app.add_handler(CallbackQueryHandler(cb_verify,  pattern="^verify_join$"))
+    app.add_handler(CallbackQueryHandler(cb_verify,        pattern="^verify_join$"))
     app.add_handler(CallbackQueryHandler(cb_points_button, pattern="^my_points$"))
-    app.add_handler(CallbackQueryHandler(cb_redeem, pattern="^redeem_"))
+    app.add_handler(CallbackQueryHandler(cb_redeem,        pattern="^redeem_"))
+
     logging.info("Bot starting…")
     await app.initialize()
     await app.start()
